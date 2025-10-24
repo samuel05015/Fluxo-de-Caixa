@@ -44,18 +44,11 @@ export default function Dashboard({ session }: DashboardProps) {
     fetchProfileAndTransactions();
   }, [session]);
 
-  // Efeito que recalcula a projeção e saldo atual quando os dados mudam
+  // Efeito que recalcula a projeção quando os dados mudam
   useEffect(() => {
-    if (profile) {
-      // Calcula saldo atual: saldo inicial + soma de transações pagas
-      const paidTransactionsSum = transactions
-        .filter(t => t.is_paid)
-        .reduce((sum, t) => sum + Number(t.amount), 0);
-      
-      const currentBalance = profile.current_balance + paidTransactionsSum;
-      
-      // recalcula projeção com base no saldo atual e transações não pagas
-      const data = calculateProjection(currentBalance, transactions);
+    if (profile && transactions.length >= 0) {
+      // Usa o saldo atual do perfil (já inclui transações pagas)
+      const data = calculateProjection(profile.current_balance, transactions);
       setProjectionData(data);
     }
   }, [profile, transactions]);
@@ -66,14 +59,27 @@ export default function Dashboard({ session }: DashboardProps) {
       setLoading(true);
       const { user } = session;
 
-      // Busca Perfil (Saldo Inicial)
+      // Busca Perfil (Saldo Inicial) - cria se não existir
       let { data: profileData, error: profileError } = await supabase
         .from('profiles')
         .select('current_balance')
         .eq('id', user.id)
         .single();
       
-      if (profileError) throw profileError;
+      // Se perfil não existe, cria um com saldo inicial 0
+      if (profileError && profileError.code === 'PGRST116') {
+        const { data: newProfile, error: createError } = await supabase
+          .from('profiles')
+          .insert({ id: user.id, current_balance: 0 })
+          .select()
+          .single();
+        
+        if (createError) throw createError;
+        profileData = newProfile;
+      } else if (profileError) {
+        throw profileError;
+      }
+      
       setProfile(profileData);
 
       // Busca Lançamentos
@@ -121,6 +127,18 @@ export default function Dashboard({ session }: DashboardProps) {
         const next = [...prev, added];
         return next.sort((a, b) => a.due_date.localeCompare(b.due_date));
       });
+      
+      // Se a transação for marcada como paga, atualiza o saldo do perfil
+      if (added.is_paid) {
+        const newBalance = (profile?.current_balance || 0) + finalAmount;
+        await supabase
+          .from('profiles')
+          .update({ current_balance: newBalance })
+          .eq('id', user.id);
+        
+        setProfile(prev => prev ? { ...prev, current_balance: newBalance } : null);
+      }
+      
       // Limpa formulário
       setDescription('');
       setAmount(0);
@@ -129,7 +147,7 @@ export default function Dashboard({ session }: DashboardProps) {
   };
 
   // Marca/Desmarca como pago
-  const togglePaid = async (id: string, currentlyPaid: boolean) => {
+  const togglePaid = async (id: string, currentlyPaid: boolean, transactionAmount: number) => {
     const { data, error } = await supabase
       .from('transactions')
       .update({ is_paid: !currentlyPaid })
@@ -142,6 +160,19 @@ export default function Dashboard({ session }: DashboardProps) {
       return;
     }
 
+    // Atualiza o saldo do perfil
+    const { user } = session;
+    const currentBalance = profile?.current_balance || 0;
+    const newBalance = !currentlyPaid 
+      ? currentBalance + transactionAmount  // Marcando como pago: adiciona ao saldo
+      : currentBalance - transactionAmount; // Desmarcando: remove do saldo
+    
+    await supabase
+      .from('profiles')
+      .update({ current_balance: newBalance })
+      .eq('id', user.id);
+    
+    setProfile(prev => prev ? { ...prev, current_balance: newBalance } : null);
     setTransactions(prev => prev.map(t => (t.id === id ? (data as Transaction) : t)));
   };
 
@@ -185,12 +216,14 @@ export default function Dashboard({ session }: DashboardProps) {
     return true;
   });
 
-  // Calcula o saldo atual baseado no saldo inicial + transações pagas
-  const paidTransactionsSum = transactions
+  // Calcula estatísticas
+  const totalPaid = transactions
     .filter(t => t.is_paid)
     .reduce((sum, t) => sum + Number(t.amount), 0);
   
-  const currentBalance = profile ? profile.current_balance + paidTransactionsSum : 0;
+  const totalPending = transactions
+    .filter(t => !t.is_paid)
+    .reduce((sum, t) => sum + Number(t.amount), 0);
 
   return (
     <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '20px' }}>
@@ -206,11 +239,11 @@ export default function Dashboard({ session }: DashboardProps) {
         <h1 style={{ margin: '0 0 10px 0', fontSize: '2.5rem' }}>💰 Caixa Radar</h1>
         <div style={{ fontSize: '1.2rem', opacity: 0.9 }}>Saldo Atual</div>
         <div style={{ fontSize: '3rem', fontWeight: 'bold', margin: '10px 0' }}>
-          R$ {currentBalance?.toFixed(2) || '0.00'}
+          R$ {profile?.current_balance?.toFixed(2) || '0.00'}
         </div>
         <div style={{ fontSize: '0.9rem', opacity: 0.8, marginTop: '10px' }}>
-          Saldo Inicial: R$ {profile?.current_balance?.toFixed(2) || '0.00'} | 
-          Total Pago: R$ {paidTransactionsSum?.toFixed(2) || '0.00'}
+          Total Realizado: R$ {totalPaid?.toFixed(2) || '0.00'} | 
+          Total Pendente: R$ {totalPending?.toFixed(2) || '0.00'}
         </div>
       </div>
 
@@ -244,7 +277,7 @@ export default function Dashboard({ session }: DashboardProps) {
               style={{ width: '100%', padding: 8, marginBottom: 12 }}
             />
 
-            <label style={{ display: 'block', marginBottom: 8, fontWeight: 600 }}>Data de Vencimento</label>
+            <label style={{ display: 'block', marginBottom: 8, fontWeight: 600 }}>Data</label>
             <input
               type="date"
               value={dueDate}
@@ -355,7 +388,7 @@ export default function Dashboard({ session }: DashboardProps) {
               <thead>
                 <tr style={{ borderBottom: '2px solid #e0e0e0', background: '#f8f9fa' }}>
                   <th style={{ padding: '12px', textAlign: 'left' }}>Descrição</th>
-                  <th style={{ padding: '12px', textAlign: 'center' }}>Vencimento</th>
+                  <th style={{ padding: '12px', textAlign: 'center' }}>Data</th>
                   <th style={{ padding: '12px', textAlign: 'right' }}>Valor</th>
                   <th style={{ padding: '12px', textAlign: 'center' }}>Status</th>
                   <th style={{ padding: '12px', textAlign: 'center' }}>Ações</th>
@@ -391,7 +424,7 @@ export default function Dashboard({ session }: DashboardProps) {
                         </span>
                       </td>
                       <td style={{ padding: '12px', textAlign: 'center' }}>
-                        <button onClick={() => togglePaid(transaction.id as any, transaction.is_paid)}>
+                        <button onClick={() => togglePaid(transaction.id as any, transaction.is_paid, transaction.amount)}>
                           {transaction.is_paid ? 'Desmarcar' : 'Marcar como pago'}
                         </button>
                       </td>
