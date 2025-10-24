@@ -1,0 +1,13 @@
+/* Estilos customizados para o Caixa Radar */
+
+@media (max-width: 768px) {
+  /* Responsivo para mobile */
+  nav {
+    flex-direction: column !important;
+    gap: 10px !important;
+  }
+  
+  .grid-2-cols {
+    grid-template-columns: 1fr !important;
+  }
+}
